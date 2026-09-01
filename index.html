@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#14171A" />
+<title>Scouting Analysis</title>
+<link rel="stylesheet" href="styles.css" />
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- ---------- Password gate ---------- -->
+<div id="loginScreen">
+  <div class="login-card">
+    <h1>Westwood <span>Scouting</span> Analysis</h1>
+    <p class="subtitle">Enter the analysis password to continue</p>
+    <input type="text" id="apiUrlLoginInput" placeholder="Apps Script Web App URL" />
+    <input type="password" id="passwordInput" placeholder="Password" />
+    <button id="loginBtn">Unlock</button>
+    <p class="login-error" id="loginError"></p>
+  </div>
+</div>
+
+<!-- ---------- Main app ---------- -->
+<div id="appShell">
+
+  <header class="app-header">
+    <div class="brand">Westwood <span>Scouting</span> Analysis</div>
+    <div class="header-actions">
+      <button class="icon-btn" id="refreshBtn">REFRESH</button>
+      <button class="icon-btn" id="settingsBtn">SETTINGS</button>
+    </div>
+  </header>
+
+  <nav class="tab-bar">
+    <button class="tab-btn active" data-tab="compare">Compare Teams</button>
+    <button class="tab-btn" data-tab="detail">Team Detail</button>
+    <button class="tab-btn" data-tab="rankings">Event Rankings</button>
+  </nav>
+
+  <!-- ===== TAB 1: Compare Teams ===== -->
+  <section class="tab-panel active" id="tab-compare">
+    <div class="card">
+      <p class="card-label">Comparison Graph</p>
+      <div class="field-row">
+        <label for="graphSelect">View</label>
+        <select id="graphSelect">
+          <option value="fuel">Total Fuel Scored (avg per match)</option>
+          <option value="defense">Defense Rating (avg)</option>
+          <option value="endgame">Endgame Climb (best achieved)</option>
+        </select>
+      </div>
+      <canvas id="compareChart" height="260"></canvas>
+      <div id="pointInfo"></div>
+    </div>
+  </section>
+
+  <!-- ===== TAB 2: Team Detail ===== -->
+  <section class="tab-panel" id="tab-detail">
+    <div class="card">
+      <p class="card-label">Select Team</p>
+      <div class="field-row">
+        <label for="teamSelect">Team</label>
+        <select id="teamSelect">
+          <option value="">— choose a team —</option>
+        </select>
+      </div>
+    </div>
+
+    <div id="teamDetailContent" style="display:none">
+      <div class="card">
+        <p class="card-label">Fuel Scored by Match</p>
+        <canvas id="teamFuelChart" height="220"></canvas>
+      </div>
+
+      <div class="card">
+        <p class="card-label">Summary</p>
+        <table>
+          <tr><th>Times Broke Down</th><td class="mono" id="teamBrokeDown">—</td></tr>
+          <tr><th>Highest Endgame Climb</th><td class="mono" id="teamHighestClimb">—</td></tr>
+        </table>
+      </div>
+
+      <div class="card">
+        <p class="card-label">Notes &amp; Photos</p>
+        <div id="teamNotesList"></div>
+      </div>
+
+      <div class="card">
+        <p class="card-label">Scouted By</p>
+        <div id="teamScoutersList"></div>
+      </div>
+    </div>
+
+    <div class="empty-state" id="teamDetailEmpty">Select a team above to see its data.</div>
+  </section>
+
+  <!-- ===== TAB 3: Event Rankings ===== -->
+  <section class="tab-panel" id="tab-rankings">
+    <div class="card">
+      <p class="card-label">The Blue Alliance — Event Rankings</p>
+      <div class="field-row">
+        <label for="tbaYear">Year</label>
+        <input type="number" id="tbaYear" placeholder="2026" style="width:100px" />
+        <button class="primary-btn" id="loadEventsBtn">Load Events</button>
+      </div>
+      <div class="field-row" id="eventSearchRow" style="display:none;flex-direction:column;align-items:stretch;">
+        <label for="eventSearchInput" style="margin-bottom:6px;">Search Events</label>
+        <input type="text" id="eventSearchInput" placeholder="Type part of an event name..." style="width:100%;" />
+        <div id="eventResultsList" style="margin-top:8px;max-height:240px;overflow-y:auto;"></div>
+      </div>
+      <p id="selectedEventLabel" style="color:var(--text-dim);font-size:13px;margin:8px 0 0;"></p>
+    </div>
+
+    <div class="card" id="rankingsCard" style="display:none">
+      <p class="card-label">Rankings <span style="color:var(--text-dim);font-weight:normal;font-size:11px;">(click a column to sort)</span></p>
+      <table id="rankingsTable">
+        <thead>
+          <tr>
+            <th class="sortable" data-key="rank">Rank</th>
+            <th class="sortable" data-key="team">Team</th>
+            <th class="sortable" data-key="wins">Record (W-L-T)</th>
+            <th class="sortable" data-key="played">Played</th>
+            <th class="sortable" data-key="rankingScore">Ranking Score</th>
+            <th class="sortable" data-key="opr">OPR</th>
+            <th class="sortable" data-key="avgMatch">Avg Match</th>
+            <th class="sortable" data-key="avgAutoFuel">Avg Auto Fuel</th>
+            <th class="sortable" data-key="avgTower">Avg Tower</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+</div>
+
+<!-- ---------- Settings modal ---------- -->
+<div class="modal-overlay" id="settingsModal" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);display:none;align-items:center;justify-content:center;z-index:40;padding:20px;">
+  <div class="login-card" style="text-align:left;max-width:420px;">
+    <h1 style="font-size:16px;margin-bottom:16px;">Settings</h1>
+    <div class="field-row" style="display:block">
+      <label for="apiUrlInput" style="display:block;margin-bottom:6px;">Apps Script Web App URL</label>
+      <input type="text" id="apiUrlInput" style="width:100%;text-align:left;" placeholder="https://script.google.com/macros/s/.../exec" />
+    </div>
+    <div class="field-row" style="display:block">
+      <label for="tbaKeyInput" style="display:block;margin-bottom:6px;">TBA API Read Key (optional override)</label>
+      <input type="text" id="tbaKeyInput" style="width:100%;text-align:left;" placeholder="Leave blank to use the built-in team key" />
+    </div>
+    <div style="display:flex;gap:10px;margin-top:16px;">
+      <button class="icon-btn" id="settingsCancel" style="flex:1;">Cancel</button>
+      <button class="primary-btn" id="settingsSave" style="flex:1;">Save</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
