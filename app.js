@@ -75,20 +75,60 @@ function driveThumbnail(url) {
 
 // ---------- Compare Teams tab ----------
 
+let showCompareDetails = false; // toggled by the Show Details button
+
+function computeStats(values) {
+  const n = values.length;
+  const mean = values.reduce((s, v) => s + v, 0) / n;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const variance = values.reduce((s, v) => s + (v - mean) ** 2, 0) / n;
+  const std = Math.sqrt(variance);
+  return { mean, min, max, std };
+}
+
+// Percentile with linear interpolation, on a pre-sorted array.
+function percentile(sorted, p) {
+  const n = sorted.length;
+  if (n === 1) return sorted[0];
+  const idx = (p / 100) * (n - 1);
+  const lower = Math.floor(idx);
+  const upper = Math.ceil(idx);
+  if (lower === upper) return sorted[lower];
+  const frac = idx - lower;
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * frac;
+}
+
+// Real statistical quartile boundaries — each of the 4 resulting bands
+// (min→q1, q1→median, median→q3, q3→max) always contains exactly 25% of
+// the values by construction, so the *height* of each band on the chart
+// reflects how spread out that quarter of the data actually is: tightly
+// clustered values produce a short band, widely spread values a tall one.
+function computeQuartileBoundaries(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return {
+    q1: percentile(sorted, 25),
+    median: percentile(sorted, 50),
+    q3: percentile(sorted, 75)
+  };
+}
+
+// Returns one row per team with mean/min/max/std for the selected metric,
+// sorted highest-mean-first (so the chart reads high-to-low, left-to-right).
 function buildCompareDataset(mode) {
   const teams = uniqueTeams(rawData);
-  return teams.map((team, i) => {
-    const rows = rawData.filter((r) => String(r.team_number) === team);
-    let value;
-    if (mode === 'fuel') {
-      value = rows.reduce((sum, r) => sum + totalFuel(r), 0) / rows.length;
-    } else if (mode === 'defense') {
-      value = rows.reduce((sum, r) => sum + num(r.defense_rating), 0) / rows.length;
-    } else if (mode === 'endgame') {
-      value = Math.max(...rows.map((r) => climbLevel(r.endgame_status)));
-    }
-    return { x: i, y: value, team };
+  const rows = teams.map((team) => {
+    const teamRows = rawData.filter((r) => String(r.team_number) === team);
+    let values;
+    if (mode === 'fuel') values = teamRows.map((r) => totalFuel(r));
+    else if (mode === 'defense') values = teamRows.map((r) => num(r.defense_rating));
+    else if (mode === 'endgame') values = teamRows.map((r) => climbLevel(r.endgame_status));
+    const stats = computeStats(values);
+    const quartiles = computeQuartileBoundaries(values);
+    return { team, ...stats, ...quartiles };
   });
+  rows.sort((a, b) => b.mean - a.mean);
+  return rows;
 }
 
 // Generates a distinct color for each team by rotating around the color
@@ -99,63 +139,170 @@ function colorForIndex(i, total) {
   return `hsl(${hue}, 70%, 60%)`;
 }
 
+// Draws a horizontal pill-shaped rectangle — rounded left/right ends —
+// matching the rounded bar segments in the sketch.
+function drawRoundedBar(ctx, x, y, width, height, fillStyle) {
+  const r = Math.min(height / 2, width / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.arcTo(x + width, y, x + width, y + r, r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.arcTo(x + width, y + height, x + width - r, y + height, r);
+  ctx.lineTo(x + r, y + height);
+  ctx.arcTo(x, y + height, x, y + height - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+  ctx.fillStyle = fillStyle;
+  ctx.fill();
+}
+
 function renderCompareChart() {
   const mode = document.getElementById('graphSelect').value;
   const dataset = buildCompareDataset(mode);
   const ctx = document.getElementById('compareChart').getContext('2d');
   const colors = dataset.map((_, i) => colorForIndex(i, dataset.length));
+  const labels = dataset.map((d) => 'Team ' + d.team);
+
+  // Full min/max/std-dev/quarter breakdown only applies to Total Fuel
+  // Scored — Defense and Endgame just show the average, kept simple.
+  const detailedMode = mode === 'fuel';
+  document.getElementById('detailsToggleBtn').style.display = detailedMode ? 'inline-block' : 'none';
 
   const labelForMode = {
     fuel: 'Avg Total Fuel Scored',
     defense: 'Avg Defense Rating',
-    endgame: 'Best Endgame Climb'
+    endgame: 'Avg Endgame Climb'
   }[mode];
 
-  const yTicksCallback = mode === 'endgame'
-    ? (val) => CLIMB_LABEL.hasOwnProperty(val) ? CLIMB_LABEL[val] : ''
-    : undefined;
+  const rangeData = dataset.map((d) => [d.min, d.max]);
+  const FIXED_MEAN_PIXEL_HEIGHT = 18; // a bit taller than before
+
+  // Everything visual — the quartered min→max block AND the bright mean
+  // bar — is hand-drawn here on top of one fully-transparent placeholder
+  // bar per team. Using a single dataset (rather than separate ones for
+  // range/mean) guarantees exactly one column per team, with no risk of
+  // Chart.js laying out multiple datasets side-by-side instead of on top
+  // of each other.
+  const compareChartPlugin = {
+    id: 'compareChartExtras',
+    afterDatasetsDraw(chart) {
+      const meta = chart.getDatasetMeta(0);
+      const yScale = chart.scales.y;
+
+      meta.data.forEach((bar, i) => {
+        const d = dataset[i];
+        const x = bar.x;
+        const width = bar.width;
+        const yMinPixel = yScale.getPixelForValue(d.min);
+        const yMaxPixel = yScale.getPixelForValue(d.max);
+        const top = Math.min(yMinPixel, yMaxPixel);
+        const bottom = Math.max(yMinPixel, yMaxPixel);
+
+        if (detailedMode && showCompareDetails) {
+          // 5 boundary pixel positions from real quartile values — each of
+          // the 4 resulting bands always contains exactly 25% of matches,
+          // so a band's height now shows how spread out that quarter of
+          // the data actually is (tight cluster = short band).
+          const yQ1 = yScale.getPixelForValue(d.q1);
+          const yMedian = yScale.getPixelForValue(d.median);
+          const yQ3 = yScale.getPixelForValue(d.q3);
+          const boundaries = [top, ...[yQ1, yMedian, yQ3].sort((a, b) => a - b), bottom];
+
+          const quarterOpacities = [0.3, 0.55, 0.55, 0.3]; // top-to-bottom
+          ctx.save();
+          for (let q = 0; q < 4; q++) {
+            const segTop = boundaries[q];
+            const segBottom = boundaries[q + 1];
+            const fill = colors[i].replace('60%)', `60%, ${quarterOpacities[q]})`).replace('hsl', 'hsla');
+            drawRoundedBar(ctx, x - width / 2, segTop, width, segBottom - segTop, fill);
+          }
+          ctx.restore();
+
+          // 5 boundary lines: max (top), q3, median, q1, min (bottom) —
+          // colored to match this team, at an opacity between the shading
+          // (below) and the solid mean bar (above). Rounded caps on the ends.
+          ctx.save();
+          ctx.strokeStyle = colors[i].replace('60%)', '60%, 0.7)').replace('hsl', 'hsla');
+          ctx.lineWidth = 2;
+          ctx.lineCap = 'round';
+          boundaries.forEach((yLine) => {
+            ctx.beginPath();
+            ctx.moveTo(x - width / 2, yLine);
+            ctx.lineTo(x + width / 2, yLine);
+            ctx.stroke();
+          });
+          ctx.restore();
+        }
+
+        // Bright mean bar, fixed pixel height, drawn as a rounded pill —
+        // matches the old dot's diameter, always drawn on top.
+        const yMeanPixel = yScale.getPixelForValue(d.mean);
+        const halfHeight = FIXED_MEAN_PIXEL_HEIGHT / 2;
+        ctx.save();
+        drawRoundedBar(ctx, x - width / 2, yMeanPixel - halfHeight, width, FIXED_MEAN_PIXEL_HEIGHT, colors[i]);
+        ctx.restore();
+      });
+    }
+  };
+
+  // Fixed ~1 CSS inch (96px) per team column, regardless of team count —
+  // the wrapping div scrolls horizontally if this exceeds the viewport.
+  // (Note: CSS "inches" are a fixed 96px-per-inch convention per spec, not
+  // a measurement of your actual screen's physical DPI — browsers don't
+  // reliably know a display's true pixel density, so this is the closest
+  // consistent approximation available on the web.)
+  document.getElementById('compareChartInner').style.width = (dataset.length * 96 * 1.5) + 'px';
 
   if (compareChart) compareChart.destroy();
   compareChart = new Chart(ctx, {
-    type: 'scatter',
+    type: 'bar',
+    plugins: [compareChartPlugin],
     data: {
+      labels,
       datasets: [{
         label: labelForMode,
-        data: dataset,
-        backgroundColor: colors,
-        pointBorderColor: '#14171a',
-        pointBorderWidth: 1,
-        pointRadius: 7,
-        pointHoverRadius: 9
+        data: rangeData,
+        backgroundColor: 'transparent',
+        borderWidth: 0,
+        barPercentage: 0.9,
+        categoryPercentage: 0.9
       }]
     },
     options: {
       responsive: true,
+      maintainAspectRatio: false,
       scales: {
         x: {
-          ticks: {
-            callback: (val) => {
-              const point = dataset[val];
-              return point ? 'Team ' + point.team : '';
-            },
-            color: '#8b9198'
-          },
+          ticks: { color: '#8b9198' },
           grid: { color: '#323942' }
         },
         y: {
-          ticks: { color: '#8b9198', callback: yTicksCallback },
+          ticks: {
+            color: '#8b9198',
+            stepSize: mode === 'endgame' ? 1 : undefined,
+            callback: mode === 'endgame' ? (val) => Number.isInteger(val) ? val : '' : undefined
+          },
           grid: { color: '#323942' },
           ...(mode === 'endgame' ? { min: -0.5, max: 3.5 } : {})
         }
       },
       plugins: {
-        legend: { labels: { color: '#e8e6e1' } },
+        legend: { display: false },
         tooltip: {
           callbacks: {
             label: (ctx) => {
-              const point = ctx.raw;
-              const val = mode === 'endgame' ? CLIMB_LABEL[point.y] : point.y.toFixed(1);
-              return 'Team ' + point.team + ': ' + val;
+              const d = dataset[ctx.dataIndex];
+              if (!detailedMode) return ['Team ' + d.team, 'Mean: ' + d.mean.toFixed(2)];
+              return [
+                'Team ' + d.team,
+                'Mean: ' + d.mean.toFixed(2),
+                'Min: ' + d.min.toFixed(2),
+                'Max: ' + d.max.toFixed(2),
+                'Std Dev: ' + d.std.toFixed(2),
+                'Q1 / Median / Q3: ' + d.q1.toFixed(2) + ' / ' + d.median.toFixed(2) + ' / ' + d.q3.toFixed(2)
+              ];
             }
           }
         }
@@ -163,9 +310,18 @@ function renderCompareChart() {
       onClick: (evt, elements) => {
         const infoEl = document.getElementById('pointInfo');
         if (!elements.length) { infoEl.classList.remove('show'); return; }
-        const point = dataset[elements[0].index];
-        const val = mode === 'endgame' ? CLIMB_LABEL[point.y] : point.y.toFixed(1);
-        infoEl.textContent = 'Team ' + point.team + ' — ' + labelForMode + ': ' + val;
+        const d = dataset[elements[0].index];
+        if (!detailedMode) {
+          infoEl.textContent = 'Team ' + d.team + ' — ' + labelForMode + ' — Mean: ' + d.mean.toFixed(2);
+          infoEl.classList.add('show');
+          return;
+        }
+        infoEl.textContent = 'Team ' + d.team + ' — ' + labelForMode +
+          ' — Mean: ' + d.mean.toFixed(2) +
+          ', Min: ' + d.min.toFixed(2) +
+          ', Max: ' + d.max.toFixed(2) +
+          ', Std Dev: ' + d.std.toFixed(2) +
+          ' — Q1 / Median / Q3: ' + d.q1.toFixed(2) + ' / ' + d.median.toFixed(2) + ' / ' + d.q3.toFixed(2);
         infoEl.classList.add('show');
       }
     }
@@ -423,6 +579,11 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // ----- Compare Teams -----
   document.getElementById('graphSelect').addEventListener('change', renderCompareChart);
+  document.getElementById('detailsToggleBtn').addEventListener('click', () => {
+    showCompareDetails = !showCompareDetails;
+    document.getElementById('detailsToggleBtn').textContent = 'Show Details: ' + (showCompareDetails ? 'ON' : 'OFF');
+    renderCompareChart();
+  });
 
   // ----- Team Detail -----
   document.getElementById('teamSelect').addEventListener('change', (e) => {
